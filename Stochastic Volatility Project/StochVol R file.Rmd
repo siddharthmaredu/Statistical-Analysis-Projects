@@ -1,0 +1,123 @@
+---
+title: "StochVol"
+author: "Sathish Komire"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+```
+```{r}
+forex <- read.csv("C:/Users/siddh/OneDrive/Desktop/Term 3/Time Series/Project/fx_data.csv",head=T,sep=",")
+head(forex)
+```
+```{r}
+forex$Date <- as.Date(forex$Date)
+forex$Date <- ymd(forex$Date)
+```
+
+
+```{r}
+forex <- forex %>%
+  group_by(Date)%>%
+  summarise(USDINR_Close = mean(USDINR_Close))
+forex
+```
+```{r}
+
+forex_UsdInr <- forex %>% 
+  filter(year(Date) >= 2017 & year(Date) < 2022)
+ 
+forex_UsdInr
+```
+```{r}
+df <- as.data.frame(forex_UsdInr)
+plot(df$Date, df$USDINR_Close, type = 'l', main = 'USD/INR Closing Prices')
+```
+```{r}
+str(df)
+```
+```{r}
+library(stochvol)
+```
+
+```{r}
+sim <- svsim(500, mu = -9, phi = 0.95, sigma = 0.15)
+par(mfrow = c(2, 1))
+plot(sim)
+```
+
+```{r}
+
+# # Define the equation for expected value of phi
+# expected_phi <- function(a0, b0, target_value) {
+#   return((2 * a0) / (a0 + b0) - 1 - target_value)
+# }
+# 
+# # Set the target expected value
+# target_value <- 0.95
+# 
+# # Solve for a0 and b0
+# sol <- uniroot(expected_phi, interval = c(0.1, 100), b0 = 1, target_value = target_value, tol = 1e-8)
+# 
+# # Extract the solution
+# a0 <- sol$root
+# b0 <- 1
+# 
+# # Print the results
+# cat("a0 =", a0, "\n")
+# cat("b0 =", b0, "\n")
+```
+```{r}
+# mean(df$returns, na.rm = T)
+# var(df$returns, na.rm = T)
+```
+
+```{r}
+res1 <- svsample(sim, priormu = c(0, 100), priorphi = c(39, 1),
+                priorsigma = .15)
+```
+```{r}
+###################################################
+plot(res1, showobs = FALSE)
+```
+
+```{r}
+res2 <- svsample(sim, priormu = c(0, 200), priorphi = c(15, 10),
+                priorsigma = .15)
+```
+```{r}
+###################################################
+plot(res2, showobs = FALSE)
+```
+
+
+
+
+```{r}
+ret = logret(na.omit(df$USDINR_Close), demean = T)
+res2 <- svsample(ret, priormu = c(0, 100), priorphi = c(10, 2), priorsigma = .1)
+
+volplot(res2, forecast = 180, dates = df$Date[-1])
+```
+
+
+```{r}
+
+###################################################
+plot(res2, showobs = FALSE)
+```
+
+```{r}
+myresid2 <- resid(res2)
+plot(myresid2, ret)
+```
+

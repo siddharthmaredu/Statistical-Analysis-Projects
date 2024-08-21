@@ -1,0 +1,428 @@
+---
+title: "UD final project 2"
+author: "Siddharth Maredu, Ram Terli, Srinivas Yedla"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+### basic cleaning 
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(stringr)
+library(tidytext)
+library(ggplot2)
+library(tm)
+library(wordcloud)
+library(syuzhet)
+library(htmltools)
+library(textclean)
+library(textstem)
+
+clean_tweet <- function(tweet) {
+  tweet <- str_remove_all(tweet, "@\\w+")
+  tweet <- str_remove_all(tweet, "http\\S+|www\\S+|https\\S+")
+  tweet <- str_remove_all(tweet, "#\\w+")
+  tweet <- str_remove_all(tweet, "[^A-Za-z0-9\\s]+")
+  tweet <- tolower(tweet)
+  tweet <- str_remove_all(tweet, "\\bamp\\b")
+  tweet <- str_squish(tweet)
+  tweet <- replace_contraction(tweet)
+  tweet <- replace_emoji(tweet)
+  tweet <- replace_word_elongation(tweet)
+  tweet <- lemmatize_strings(tweet)
+  return(tweet)
+}
+
+# Read the CSV file
+train_data <- read.csv("C:/Users/siddh/OneDrive/Desktop/Term 4/Unstructured/Project/train.csv")
+
+# Apply the cleaning function to the tweet column
+train_data$cleaned_tweet <- sapply(train_data$tweet, clean_tweet)
+```
+
+### removing stopwords
+
+```{r}
+# Remove stop words
+tokens <- train_data %>%
+  unnest_tokens(word, cleaned_tweet) %>%
+  anti_join(stop_words)
+
+# Reconstruct the cleaned tweets without stop words
+cleaned_tweets_no_stop <- tokens %>%
+  group_by(id) %>%
+  summarize(cleaned_tweet_no_stop = paste(word, collapse = " "))
+
+# Merge the new cleaned tweets back into the original dataframe
+train_data <- train_data %>%
+  left_join(cleaned_tweets_no_stop, by = "id")
+
+# Calculate the length of each tweet
+train_data$tweet_length <- nchar(train_data$cleaned_tweet_no_stop)
+
+# Handle missing or non-finite values in tweet_length
+train_data <- train_data %>%
+  filter(!is.na(tweet_length) & is.finite(tweet_length))
+
+```
+
+
+### sentiment
+
+```{r}
+# Define the function to classify sentiment
+classify_sentiment <- function(tweet) {
+  sentiment <- get_sentiment(tweet, method = "syuzhet")
+  if (sentiment > 0) {
+    return("positive")
+  } else if (sentiment < 0) {
+    return("negative")
+  } else {
+    return("neutral")
+  }
+}
+
+# Apply the sentiment classification function to the cleaned tweets
+train_data$predicted <- sapply(train_data$cleaned_tweet_no_stop, classify_sentiment)
+
+# View the first few rows with the predicted sentiment
+head(train_data[, c("id", "cleaned_tweet_no_stop", "predicted")])
+
+```
+
+### word cloud
+
+```{r}
+# Filter out neutral tweets
+positive_tweets <- train_data %>% filter(predicted == "positive")
+negative_tweets <- train_data %>% filter(predicted == "negative")
+neutral_tweets <- train_data %>% filter(predicted == "neutral")
+
+# Create word clouds for positive and negative tweets
+positive_corpus <- Corpus(VectorSource(positive_tweets$cleaned_tweet_no_stop))
+negative_corpus <- Corpus(VectorSource(negative_tweets$cleaned_tweet_no_stop))
+neutral_corpus <- Corpus(VectorSource(neutral_tweets$cleaned_tweet_no_stop))
+
+positive_tdm <- TermDocumentMatrix(positive_corpus)
+negative_tdm <- TermDocumentMatrix(negative_corpus)
+neutral_tdm <- TermDocumentMatrix(neutral_corpus)
+
+positive_matrix <- as.matrix(positive_tdm)
+negative_matrix <- as.matrix(negative_tdm)
+neutral_matrix <- as.matrix(neutral_tdm)
+
+positive_freqs <- sort(rowSums(positive_matrix), decreasing = TRUE)
+negative_freqs <- sort(rowSums(negative_matrix), decreasing = TRUE)
+neutral_freqs <- sort(rowSums(neutral_matrix), decreasing = TRUE)
+
+positive_df <- data.frame(word = names(positive_freqs), freq = positive_freqs)
+negative_df <- data.frame(word = names(negative_freqs), freq = negative_freqs)
+neutral_df <- data.frame(word = names(neutral_freqs), freq = neutral_freqs)
+
+# Generate word clouds
+wordcloud(words = positive_df$word, freq = positive_df$freq, min.freq = 2, 
+          max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+
+wordcloud(words = negative_df$word, freq = negative_df$freq, min.freq = 2, 
+          max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Reds"))
+
+wordcloud(words = neutral_df$word, freq = neutral_df$freq, min.freq = 2, 
+          max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Blues"))
+```
+
+#freq dist of tweets
+
+```{r}
+
+# Plot the frequency distribution of tweet lengths
+ggplot(train_data, aes(x = tweet_length, fill = predicted)) +
+  geom_histogram(binwidth = 5, position = "dodge") +
+  labs(title = "Frequency Distribution of Tweet Lengths",
+       x = "Tweet Length",
+       y = "Frequency")
+
+```
+
+# top words positive and negative
+
+```{r}
+# Tokenize the cleaned tweets without stop words
+tokens <- train_data %>%
+  unnest_tokens(word, cleaned_tweet_no_stop)
+
+# Plot top words for positive tweets
+positive_tokens <- tokens %>%
+  filter(predicted == "positive")
+
+positive_top_words <- positive_tokens %>%
+  count(word, sort = TRUE) %>%
+  top_n(10)
+
+ggplot(positive_top_words, aes(x = reorder(word, n), y = n, fill = word)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top Words in Positive Tweets", x = "Word", y = "Count")
+
+# Plot top words for negative tweets
+negative_tokens <- tokens %>%
+  filter(predicted == "negative")
+
+negative_top_words <- negative_tokens %>%
+  count(word, sort = TRUE) %>%
+  top_n(10)
+
+ggplot(negative_top_words, aes(x = reorder(word, n), y = n, fill = word)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top Words in Negative Tweets", x = "Word", y = "Count")
+
+# Plot top words for neutral tweets
+neutral_tokens <- tokens %>%
+  filter(predicted == "neutral")
+
+neutral_top_words <- neutral_tokens %>%
+  count(word, sort = TRUE) %>%
+  top_n(10)
+
+ggplot(neutral_top_words, aes(x = reorder(word, n), y = n, fill = word)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top Words in Neutral Tweets", x = "Word", y = "Count")
+
+```
+
+# Word Associations
+
+```{r}
+dtm <- DocumentTermMatrix(Corpus(VectorSource(train_data$cleaned_tweet_no_stop)))
+# Find word associations
+associations <- findAssocs(dtm, terms = c("positive", "negative", "neutral"), corlimit = 0.1)
+print(associations)
+
+```
+### visualize associations 
+```{r}
+library(ggplot2)
+
+# Convert associations to a data frame for plotting
+assoc_df <- do.call(rbind, lapply(names(associations), function(sentiment) {
+  data.frame(sentiment = sentiment, term = names(associations[[sentiment]]), correlation = unlist(associations[[sentiment]]))
+}))
+
+# Plot associations
+ggplot(assoc_df, aes(x = reorder(term, correlation), y = correlation, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ sentiment, scales = "free") +
+  coord_flip() +
+  labs(title = "Word Associations by Sentiment", x = "Terms", y = "Correlation") +
+  theme_minimal()
+
+```
+
+### Sentiment Classification Function
+```{r}
+library(dplyr)
+
+# Define a function to classify sentiment based on word associations
+classify_sentiment <- function(text, positive_words, negative_words, neutral_words) {
+  words <- unlist(strsplit(text, "\\s+"))
+  pos_score <- sum(words %in% positive_words)
+  neg_score <- sum(words %in% negative_words)
+  neu_score <- sum(words %in% neutral_words)
+  
+  if (pos_score > neg_score & pos_score > neu_score) {
+    return("positive")
+  } else if (neg_score > pos_score & neg_score > neu_score) {
+    return("negative")
+  } else {
+    return("neutral")
+  }
+}
+
+# Define the words associated with each sentiment
+positive_words <- names(associations$positive)
+negative_words <- names(associations$negative)
+neutral_words <- names(associations$neutral)
+
+# Apply the classification function to the dataset
+train_data <- train_data %>%
+  mutate(predicted_sentiment = sapply(cleaned_tweet_no_stop, classify_sentiment, 
+                                      positive_words = positive_words, 
+                                      negative_words = negative_words, 
+                                      neutral_words = neutral_words))
+
+```
+
+### new sentiment word cloud
+
+```{r}
+library(wordcloud)
+
+# Generate word clouds for each sentiment
+positive_words <- train_data %>% filter(predicted_sentiment == "positive") %>% pull(cleaned_tweet_no_stop)
+negative_words <- train_data %>% filter(predicted_sentiment == "negative") %>% pull(cleaned_tweet_no_stop)
+neutral_words <- train_data %>% filter(predicted_sentiment == "neutral") %>% pull(cleaned_tweet_no_stop)
+
+wordcloud(positive_words, max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+wordcloud(negative_words, max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Reds"))
+wordcloud(neutral_words, max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Blues"))
+
+```
+
+
+# sentence level sentiment
+
+```{r}
+library(sentimentr)
+sentiment_scores <- sentiment_by(train_data$cleaned_tweet_no_stop)
+train_data$sentimentr_score <- sentiment_scores$ave_sentiment
+
+```
+
+### distribution of sentiment scores
+
+```{r}
+library(ggplot2)
+
+# Plot the distribution of sentiment scores
+ggplot(train_data, aes(x = sentimentr_score)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", color = "black") +
+  labs(title = "Distribution of Sentiment Scores", x = "Sentiment Score", y = "Frequency")
+
+```
+
+### tweets classification
+
+```{r}
+# Classify tweets into positive, negative, and neutral based on sentiment scores
+train_data$sentiment_class <- ifelse(train_data$sentimentr_score > 0, "positive",
+                                     ifelse(train_data$sentimentr_score < 0, "negative", "neutral"))
+
+# View the distribution of sentiment classes
+table(train_data$sentiment_class)
+
+```
+
+### word cloud
+
+```{r}
+library(wordcloud)
+
+# Generate word clouds for each sentiment
+positive_words <- train_data %>% filter(sentiment_class == "positive") %>% pull(cleaned_tweet_no_stop)
+negative_words <- train_data %>% filter(sentiment_class == "negative") %>% pull(cleaned_tweet_no_stop)
+neutral_words <- train_data %>% filter(sentiment_class == "neutral") %>% pull(cleaned_tweet_no_stop)
+
+wordcloud(positive_words, max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+wordcloud(negative_words, max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Reds"))
+wordcloud(neutral_words, max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Blues"))
+
+```
+
+# Emotion Analysis
+
+```{r}
+nrc_sentiment <- get_nrc_sentiment(train_data$cleaned_tweet_no_stop)
+train_data <- cbind(train_data, nrc_sentiment)
+
+```
+
+### aggregate emotion scores
+
+```{r}
+total_sentiment <- colSums(nrc_sentiment)
+print(total_sentiment)
+```
+
+> Interpretation
+
+Joy and Positive Sentiment:
+
+The highest count is for joy (11172) and positive sentiment (17445), suggesting that your dataset has a significant amount of positive and joyful content. Anticipation and Trust:
+
+Anticipation (10855) and trust (9991) also have high counts, indicating that tweets often express forward-looking thoughts and confidence. Negative Emotions:
+
+Negative sentiment (9950), anger (5083), fear (5595), sadness (4869), and disgust (3790) are present but less frequent than positive emotions. This suggests that while negative sentiments are present, they are not as dominant as positive ones in your dataset. Surprise:
+
+Surprise (4126) is relatively moderate, indicating a fair amount of unexpected or surprising content.
+
+### Visualize emotions
+
+```{r}
+barplot(colSums(nrc_sentiment), las=2, col=rainbow(10),
+        main="Overall Sentiment Distribution",
+        ylab="Count", xlab="Sentiment")
+```
+
+```{r}
+hist(train_data$label)
+```
+
+
+# LDA
+
+```{r}
+library(topicmodels)
+# Create a corpus and document-term matrix
+negative_corpus <- Corpus(VectorSource(negative_tweets$cleaned_tweet_no_stop))
+negative_dtm <- DocumentTermMatrix(negative_corpus)
+
+# Perform LDA with k = 2
+lda_model <- LDA(negative_dtm, k = 2, control = list(seed = 1234))
+
+# Get the topics
+topics <- tidy(lda_model, matrix = "beta")
+
+# Get the top terms for each topic
+top_terms <- topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# Print the top terms for each topic
+print(top_terms)
+
+# Visualize the top terms for each topic
+library(ggplot2)
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = as.factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() +
+  labs(title = "Top Terms in Each LDA Topic",
+       x = "Terms",
+       y = "Beta")
+```
+
+### perplexity for k
+
+
+```{r}
+samp_size <- floor(.9*nrow(negative_dtm))
+set.seed(1234)
+train_i <- sample(nrow(negative_dtm), size=samp_size)
+train_lda <- negative_dtm[train_i,]
+test_lda <- negative_dtm[-train_i,]
+```
+
+
+```{r}
+values <- c()
+for(i in c(2:5)){
+  lda_model <- LDA(train_lda, k=i, control=list(seed=1234))
+  values  <- c(values, perplexity(lda_model, newdata=test_lda))
+} 
+
+plot(c(2:5), values, main="Perplexity for k",
+     xlab="Number of Topics", ylab="perplexity")
+
+
+```
+

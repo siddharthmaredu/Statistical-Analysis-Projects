@@ -1,0 +1,546 @@
+---
+title: "Big Data & AI code file"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-04-12"
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+```{r, include = FALSE}
+library(tidyverse)
+library(tidytable)
+library(caret)
+library(stringr)
+library(xgboost)
+library(pROC)
+library(tpc)
+library(fixest)
+
+
+
+df <- read.csv("/cloud/project/data/airbnb-project-msba-kaggle-train.csv")
+```
+
+```{r, echo=FALSE}
+dt <- df
+
+# Remove dollar signs
+remove_dollar_sign <- c("price", "weekly_price", "monthly_price", "extra_people")
+
+dt <-
+  dt %>%
+  mutate_at(remove_dollar_sign, ~str_replace_all(., pattern="\\$", replacement="")) %>%
+  mutate_at(remove_dollar_sign, ~str_replace_all(., pattern=",", replacement="")) %>%
+  mutate_at(remove_dollar_sign, ~as.numeric(.))
+
+# Remove percentage signs
+remove_pct_sign <- c("host_response_rate", "host_acceptance_rate")
+
+dt <-
+  dt %>%
+  mutate_at(remove_pct_sign, ~str_replace_all(., pattern="\\%", replacement="")) %>%
+  mutate_at(remove_pct_sign, ~as.numeric(.)) %>%
+  mutate_at(remove_pct_sign, ~./100)
+
+# Clean Up host_response_time
+dt <- dt %>% 
+  mutate(host_response_time = ifelse(host_response_time == "a few days or more" , 0, ifelse(host_response_time == "within a day", 1, ifelse(host_response_time == "within a few hours", 2, ifelse(host_response_time == "within an hour", 3, NA)))))
+
+# quantifying the amenities column
+dt$amenities = str_count(dt$amenities, ",") + 1
+
+# merging bathrooms and bathrooms_text
+dt$bathrooms_number = as.numeric(gsub("[^0-9\\.]", "", dt$bathrooms_text))
+dt$bathrooms_merged <- coalesce(dt$bathrooms, dt$bathrooms_number)
+dt <- dt %>% select(!c(bathrooms,bathrooms_text,bathrooms_number))
+
+#standarardize weekly and monthly prices
+dt <- dt%>% 
+  mutate(weekly_price = ifelse(is.na(weekly_price), price * 7, weekly_price),
+         monthly_price = ifelse(is.na(monthly_price), weekly_price * 4, monthly_price))
+
+#Clean up room_type
+
+# Perform one-hot encoding
+encoded_data <- model.matrix(~ room_type - 1, data = dt)
+
+# Convert the encoded data to a data frame
+encoded_df <- as.data.frame(encoded_data)
+
+# Rename the columns to remove the intercept term
+colnames(encoded_df) <- gsub("^room_type", "", colnames(encoded_df))
+
+# Add the one-hot encoded columns to the original data frame
+dt <- cbind(dt, encoded_df) 
+
+dt <- dt %>% select(!room_type)
+
+# Clean bed_type column
+dt <- dt %>% mutate(bed_type = ifelse(is.na(bed_type), "Not-Listed", bed_type))
+
+# Perform one-hot encoding
+encoded_data <- model.matrix(~ bed_type - 1, data = dt)
+
+# Convert the encoded data to a data frame
+encoded_df <- as.data.frame(encoded_data)
+
+# Rename the columns to remove the intercept term
+colnames(encoded_df) <- gsub("^bed_type", "", colnames(encoded_df))
+
+# Add the one-hot encoded columns to the original data frame
+dt <- cbind(dt, encoded_df)
+
+dt1 <- dt %>% 
+  select(!c(`Not-Listed`, bed_type))
+```
+
+
+### Overall Market Model
+```{r, echo = FALSE}
+dt <- dt1 %>%
+  select(-longitude, -latitude,-region_name, - region_parent_name, -host_listing_count, -square_feet, -"Entire home/apt", -"Hotel room", -"Private room", -"Shared room", -"Pull-out Sofa", -"Real Bed" )
+
+# Calculate the mean price from non-missing values
+mean_price <- mean(dt$price, na.rm = TRUE)
+
+# Impute missing values in the 'price' column with this mean
+dt <- dt %>%
+  mutate(price = ifelse(is.na(price), mean_price, price))
+
+# Impute missing values in 'weekly_price' and 'monthly_price'
+dt <- dt %>%
+  mutate(weekly_price = ifelse(is.na(weekly_price), price * 7, weekly_price),
+         monthly_price = ifelse(is.na(monthly_price), weekly_price * 4, monthly_price))
+
+# Impute missing values in all numeric columns with the mean
+dt <- dt %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+dfc<-dt
+
+# Remove any variables that are string (character)
+dt <-
+  dt %>%
+  select_if(~!is.character(.))
+
+# This selects the 'host_response_time' and all other columns that are not characters.
+dt <- dt %>% select(host_response_time, where(~ !is.character(.))) 
+
+set.seed(3.14159)
+
+index <- createDataPartition(dt$high_booking, p = 0.8, list = FALSE)
+train.st<- dt[index,]
+test.st <- dt[-index,]
+
+data_train=as.matrix(train.st%>% select(!high_booking)) 
+data_test=as.matrix(test.st%>% select(!high_booking)) 
+
+data_2train <- xgb.DMatrix(data_train, label = train.st$high_booking)
+data_2test <- xgb.DMatrix(data_test, label = test.st$high_booking)
+
+Boost1 <- xgb.train(data = data_2train, max_depth = 3,
+              eta = 1, nthread = 5, nrounds = 6,
+              watchlist = list(train = data_2train, eval = data_2test),
+              objective = "binary:logistic")
+
+pred=ifelse(predict(object = Boost1,data_2test)>0.5,"1","0")
+
+roc(test.st$high_booking, predict(object = Boost1,data_2test))$auc
+```
+
+```{r, echo = FALSE}
+importance_matrix <- xgb.importance(feature_names = colnames(data_train), model = Boost1)
+
+# Plot feature importance
+xgb.plot.importance(importance_matrix)
+```
+
+### LA Market Model
+```{r, echo = FALSE}
+dt <- dt1 %>% 
+  filter(market == "Los Angeles")
+
+dt <- dt %>%
+  select(-longitude, -latitude,-region_name, - region_parent_name, -host_listing_count, -square_feet, -"Entire home/apt", -"Hotel room", -"Private room", -"Shared room", -"Pull-out Sofa", -"Real Bed" )
+
+# Calculate the mean price from non-missing values
+mean_price <- mean(dt$price, na.rm = TRUE)
+
+# Impute missing values in the 'price' column with this mean
+dt <- dt %>%
+  mutate(price = ifelse(is.na(price), mean_price, price))
+
+# Impute missing values in 'weekly_price' and 'monthly_price'
+dt <- dt %>%
+  mutate(weekly_price = ifelse(is.na(weekly_price), price * 7, weekly_price),
+         monthly_price = ifelse(is.na(monthly_price), weekly_price * 4, monthly_price))
+
+# Impute missing values in all numeric columns with the mean
+dt <- dt %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+# Remove any variables that are string (character)
+dt <-
+  dt %>%
+  select_if(~!is.character(.))
+
+# This selects the 'host_response_time' and all other columns that are not characters.
+dt <- dt %>% select(host_response_time, where(~ !is.character(.))) 
+
+
+set.seed(3.14159)
+
+index <- createDataPartition(dt$high_booking, p = 0.8, list = FALSE)
+train.st<- dt[index,]
+test.st <- dt[-index,]
+
+data_train=as.matrix(train.st%>% select(!high_booking)) 
+data_test=as.matrix(test.st%>% select(!high_booking)) 
+
+data_2train <- xgb.DMatrix(data_train, label = train.st$high_booking)
+data_2test <- xgb.DMatrix(data_test, label = test.st$high_booking)
+
+Boost1 <- xgb.train(data = data_2train, max_depth = 3,
+              eta = 1, nthread = 5, nrounds = 6,
+              watchlist = list(train = data_2train, eval = data_2test),
+              objective = "binary:logistic")
+
+pred=ifelse(predict(object = Boost1,data_2test)>0.5,"1","0")
+
+library(pROC)
+
+roc(test.st$high_booking, predict(object = Boost1,data_2test))$auc
+```
+
+```{r, echo = FALSE}
+importance_matrix <- xgb.importance(feature_names = colnames(data_train), model = Boost1)
+
+# Plot feature importance
+xgb.plot.importance(importance_matrix)
+```
+### Causal Inference
+```{r, echo = FALSE}
+selected_columns <- c("extra_people", "host_response_rate", "accommodates", "price","requires_license","reviews_per_month", "high_booking")
+
+dfc_dag <- dfc %>%
+  filter(market == "Los Angeles") %>% 
+  select(selected_columns)
+
+selected_columns <- c("extra_people", "host_response_rate", "accommodates", "price","requires_license","reviews_per_month", "high_booking", "zipcode")
+
+dfc <- dfc %>%
+  filter(market == "Los Angeles") %>% 
+  select(selected_columns)
+```
+
+```{r, echo = FALSE}
+dfc_dag$high_booking <- as.numeric(dfc_dag$high_booking)
+suffStat <- list(C = cor(dfc_dag), n = nrow(dfc_dag))
+
+varNames <- colnames(dfc_dag)
+
+exogenous_vars <- c("host_response_rate", "price","reviews_per_month")
+
+# Run the tpc function with the selected exogenous variables
+skel.dfc <- tpc(suffStat, indepTest = gaussCItest, labels = varNames, alpha = 0.01, context.all = exogenous_vars)
+
+
+#str(dt)
+```
+
+```{r, echo = FALSE}
+ plot(skel.dfc, main = "TPC Estimate with Global ContextVariables", cex = 100.5)
+#names(dfc)
+```
+```{r, echo = FALSE}
+library(corrplot)
+cor_dfc <- dfc %>% 
+  select(!c(zipcode, requires_license))
+
+corrplot(cor(cor_dfc, use = "pairwise.complete.obs"), type = "upper")
+```
+
+
+```{r, echo = FALSE}
+# feols(high_booking ~ accommodates | price, data = dfc)
+```
+```{r, echo = FALSE}
+acc_quartile_breaks <- quantile(dfc$accommodates, probs = seq(0, 1, by = 0.25), na.rm = TRUE)
+price_quaritle_breaks <- quantile(dfc$price, probs = seq(0, 1, by = 0.25), na.rm = TRUE)
+hrr_quaritle_breaks <- quantile(dfc$host_response_rate, probs = seq(0, 1, by = 0.25), na.rm = TRUE)
+
+# Create the numeric categories based on quartile breaks
+dfc$acc_range <- cut(dfc$accommodates, breaks = acc_quartile_breaks, include.lowest = TRUE, labels = FALSE)
+dfc$price_range <- cut(dfc$price, breaks = price_quaritle_breaks, include.lowest = TRUE, labels = FALSE)
+```
+```{r, echo = FALSE}
+# dfc1 <- dfc %>%
+#   mutate(accommodates = ifelse(acc_range != 1, 0, accommodates))
+```
+```{r, echo = FALSE}
+# feols(high_booking ~ accommodates |price, data = dfc1)
+
+```
+```{r, echo = FALSE}
+# dfc2 <- dfc %>%
+  # mutate(accommodates = ifelse(acc_range != 2, 0, accommodates))
+```
+
+```{r, echo = FALSE}
+# feols(high_booking ~ accommodates | price, data = dfc2)
+```
+```{r, echo = FALSE}
+# dfc3 <- dfc %>%
+#   mutate(accommodates = ifelse(acc_range != 3, 0, accommodates))
+# feols(high_booking ~ accommodates | price, data = dfc3)
+```
+```{r, echo = FALSE}
+# dfc4 <- dfc %>%
+#   mutate(accommodates = ifelse(acc_range != 4, 0, accommodates))
+# feols(high_booking ~ accommodates | price, data = dfc4)
+```
+
+```{r, echo = FALSE}
+# x <- dfc %>%
+#   filter(acc_range==2)
+# x$price_range <- NA
+# quartile_breaks <- quantile(x$price, probs = seq(0, 1, by = 0.25), na.rm = TRUE)
+# 
+# # Create the numeric categories based on quartile breaks
+# x$price_range <- cut(x$price, breaks = quartile_breaks, include.lowest = TRUE, labels = FALSE)
+# 
+# hist(x$price,breaks=500,xlim=range(0,300))
+```
+
+```{r, echo = FALSE}
+# Create the numeric categories based on quartile breaks
+# quartile_breaks <- quantile(x$extra_people, probs = seq(0, 1, by = 0.50), na.rm = TRUE)
+# x$ep_range <- cut(x$extra_people, breaks = quartile_breaks, include.lowest = TRUE, labels = FALSE)
+# head(x)
+```
+
+```{r, echo = FALSE}
+# x4 <- x %>%
+#   mutate(extra_people = ifelse(ep_range != 1, 0, extra_people))
+# feols(high_booking ~ extra_people | price + host_response_rate + reviews_per_month, data = x4)
+```
+```{r, echo = FALSE}
+# x5 <- x %>%
+  # mutate(extra_people = ifelse(ep_range != 2, 0, extra_people))
+# feols(high_booking ~ extra_people | price + host_response_rate + reviews_per_month, data = x5)
+```
+
+
+```{r, echo = FALSE}
+# host_df <- dfc %>% 
+#   filter(acc_range ==2) %>% 
+#   select(high_booking, host_response_rate, reviews_per_month, price) %>% 
+#   na.omit() %>% 
+#   mutate(th = ifelse(host_response_rate <= quantile(host_response_rate, .05, na.rm = T), 1, 0)) 
+# 
+# feols(high_booking~th| reviews_per_month + price, data = host_df)
+```
+
+```{r, echo = FALSE}
+# hist(host_df$host_response_rate, breaks = 20)
+# 
+# quantile(host_df$host_response_rate, seq(0, .25, by = .05))
+```
+### Accommodates Findings
+```{r, echo = FALSE}
+
+####### Origonal Version ###############
+
+
+# host_df <- dfc %>% 
+#   filter(acc_range ==2) %>% 
+#   select(high_booking, host_response_rate, reviews_per_month, price) %>% 
+#   na.omit() %>% 
+#   mutate(th = ifelse(host_response_rate >= quantile(host_response_rate, .05, na.rm = T), 1, 0)) 
+# 
+# feols(high_booking~th| reviews_per_month + price, data = host_df)
+
+
+########### Revised Version ###################
+
+# Accommodates Range
+hist(dfc$accommodates)
+```
+```{r, echo = FALSE}
+feols(high_booking~accommodates|zipcode , data = dfc)
+```
+Significant and negative. Recommend investing in airbnbs that accomodates less people. 
+
+```{r, echo = FALSE}
+dfc %>%
+  group_by(high_booking, acc_range) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  group_by(acc_range) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = factor(acc_range), y = n, fill = factor(high_booking))) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(prop, 2)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.25) +  # Adjust vjust for label positioning
+  ggtitle("Count and Proportion by Accomodates Range and High Booking") +
+  xlab("Accomodates Range") +
+  ylab("Count") +
+  scale_fill_discrete(name = "High Booking")
+```
+```{r, echo = FALSE}
+quantile(dfc$accommodates)
+```
+From the chart and these quantiles, we can see that we want to invest in Q1 (accommodates for 1-2 people) and Q2 (accommodates for 4-5 people)
+### Price Findings
+```{r, echo = FALSE}
+price1_df <- dfc %>% 
+  filter(acc_range == 1)
+
+hist(price1_df$price, breaks = 1000, xlim = c(0, 250))
+```
+```{r, echo = FALSE}
+# price1_mod <- glm(high_booking~price, data = price1_df, family = "binomial")
+# 
+# summary(price1_mod)
+
+feols(high_booking~price|zipcode,data = price1_df)
+```
+Signifiant and negative. When investing in ABNB that accommodates for 1-2 people, try not to charge too much. 
+
+```{r, echo = FALSE}
+dfc %>%
+  filter(acc_range == 1) %>%
+  group_by(high_booking, price_range) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  group_by(price_range) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = factor(price_range), y = n, fill = factor(high_booking))) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(prop, 2)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.25) +  # Adjust vjust for label positioning
+  ggtitle("Count and Proportion by Price Range and High Booking") +
+  xlab("Price Range") +
+  ylab("Count") +
+  scale_fill_discrete(name = "High Booking")
+```
+```{r, echo = FALSE}
+quantile(price1_df$price)
+```
+From the graph and the quantiles make sure not to charge over 110 for ABNBs that accommodates 1-2 people
+```{r, echo = FALSE}
+price3_df <- dfc %>% 
+  filter(acc_range == 3)
+
+hist(price3_df$price, breaks = 100)
+```
+
+
+```{r, echo = FALSE}
+# price3_mod <- glm(high_booking~price, data = price3_df, family = "binomial")
+# 
+# summary(price3_mod)
+
+
+feols(high_booking~price|zipcode,data = price3_df)
+```
+Not significant
+```{r, echo = FALSE}
+dfc %>%
+  filter(acc_range == 3) %>%
+  group_by(high_booking, price_range) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  group_by(price_range) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = factor(price_range), y = n, fill = factor(high_booking))) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(prop, 2)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.25) +  # Adjust vjust for label positioning
+  ggtitle("Count and Proportion by Price Range and High Booking") +
+  xlab("Price Range") +
+  ylab("Count") +
+  scale_fill_discrete(name = "High Booking")
+
+```
+```{r, echo = FALSE}
+quantile(price3_df$price)
+```
+
+No specific recommendation for this level of accommodates. Price proportion is similar across quantiles however Q1 has the lowest prop. 
+
+### Host Response Rate Findings
+
+```{r, echo = FALSE}
+host1_df <- dfc %>% 
+  filter(acc_range == 1)
+```
+
+```{r, echo = FALSE}
+# host1_mod <- glm(high_booking~host_response_rate, data = host1_df, family = "binomial")
+# 
+# summary(host1_mod)
+
+feols(high_booking~host_response_rate|zipcode,data = host1_df)
+```
+Positive, however not very significant.
+```{r, echo = FALSE}
+dfc %>%
+  filter(acc_range == 1) %>%
+  mutate(hrr_range = ifelse(host_response_rate > .75, 1, 0)) %>% 
+  group_by(high_booking, hrr_range) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  group_by(hrr_range) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = factor(hrr_range), y = n, fill = factor(high_booking))) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(prop, 2)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.25) +  # Adjust vjust for label positioning
+  ggtitle("Count and Proportion by Price Range and High Booking") +
+  xlab("Price Range") +
+  ylab("Count") +
+  scale_fill_discrete(name = "High Booking")
+```
+Above 75% response rate improves high booking for ABNBs that accommodates for 1-2 people. 
+
+```{r, echo = FALSE}
+quantile(host1_df$host_response_rate)
+```
+
+```{r, echo = FALSE}
+host3_df <- dfc %>% 
+  filter(acc_range == 3)
+```
+
+```{r, echo = FALSE}
+feols(high_booking~host_response_rate|zipcode,data = host3_df)
+```
+Not sig. 
+```{r, echo = FALSE}
+dfc %>%
+  filter(acc_range == 3) %>%
+  mutate(hrr_range = ifelse(host_response_rate > .75, 1, 0)) %>% 
+  group_by(high_booking, hrr_range) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  group_by(hrr_range) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = factor(hrr_range), y = n, fill = factor(high_booking))) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(prop, 2)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.25) +  # Adjust vjust for label positioning
+  ggtitle("Count and Proportion by Price Range and High Booking") +
+  xlab("Price Range") +
+  ylab("Count") +
+  scale_fill_discrete(name = "High Booking")
+```
+Above 75% response rate improves high booking for ABNBs that accommodates 4-5 people. 
